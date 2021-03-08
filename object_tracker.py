@@ -38,6 +38,8 @@ flags.DEFINE_boolean('dont_show', False, 'dont show video output')
 flags.DEFINE_boolean('info', False, 'show detailed info of tracked objects')
 flags.DEFINE_boolean('count', False, 'count objects being tracked on screen')
 
+tot_violations = 0
+cur_violations = 0
 def main(_argv):
     # Definition of the parameters
     max_cosine_distance = 0.4
@@ -200,20 +202,39 @@ def main(_argv):
         tracker.predict()
         tracker.update(detections)
 
+        # Compute Centroids and Depth
+        cord_arr = dict()
+        for track in tracker.tracks:
+          if not track.is_confirmed() or track.time_since_update > 1:
+            continue
+          bbox = track.to_tlbr()
+          cord_arr[track.track_id] = []
+          cord_arr[track.track_id].append((int(bbox[0])+int(bbox[2]))/2)
+          cord_arr[track.track_id].append((int(bbox[1])+int(bbox[3]))/2)
+          cord_arr[track.track_id].append(((2 * 3.14 * 180)/(cord_arr[track.track_id][0] + cord_arr[track.track_id][1] * 360) * 1000 + 3))
+        
+        # Compute L2 Norms of all tracked objects
+        #for track1 in tracker.tracks:
+        #  for track2 in tracker.tracks:
+        #    if track2.track_id == track1.track_id:
+        #      continue
+            
+
         # update tracks
         for track in tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 1:
                 continue 
             bbox = track.to_tlbr()
             class_name = track.get_class()
-            
+          
         # draw bbox on screen
             color = colors[int(track.track_id) % len(colors)]
             color = [i * 255 for i in color]
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
             cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
-
+            cv2.putText(frame, "Total number of violations: " + str(tot_violations), (20,30),2,1,(255,255,255),2)
+            cv2.putText(frame, "Current number of violations: " + str(cur_violations), (20,70),2,1,(255,255,255),2)
         # if enable info flag then print details about each track
             if FLAGS.info:
                 print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(str(track.track_id), class_name, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
