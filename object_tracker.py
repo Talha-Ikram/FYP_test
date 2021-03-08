@@ -41,6 +41,7 @@ flags.DEFINE_boolean('count', False, 'count objects being tracked on screen')
 
 tot_violations = 0
 cur_violations = 0
+prev_list = []
 def main(_argv):
     # Definition of the parameters
     max_cosine_distance = 0.4
@@ -235,7 +236,8 @@ def main(_argv):
               if val < 150:
                 violate_list_id.append(key)
                 break
-
+  
+        cur_violations = len(violate_list_id)
         # update tracks
         for track in tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 1:
@@ -246,10 +248,11 @@ def main(_argv):
         # draw bbox on screen
             color = colors[int(track.track_id) % len(colors)]
             color = [i * 255 for i in color]
+            if track.track_id in violate_list_id:
+              color = (255,0,0)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
             cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
-            cv2.putText(frame, "Total number of violations: " + str(tot_violations), (20,30),2,1,(255,255,255),2)
             cv2.putText(frame, "Current number of violations: " + str(cur_violations), (20,70),2,1,(255,255,255),2)
         # if enable info flag then print details about each track
             if FLAGS.info:
