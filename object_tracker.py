@@ -39,9 +39,7 @@ flags.DEFINE_boolean('dont_show', False, 'dont show video output')
 flags.DEFINE_boolean('info', False, 'show detailed info of tracked objects')
 flags.DEFINE_boolean('count', False, 'count objects being tracked on screen')
 
-tot_violations = 0
-cur_violations = 0
-prev_list = []
+
 def main(_argv):
     # Definition of the parameters
     max_cosine_distance = 0.4
