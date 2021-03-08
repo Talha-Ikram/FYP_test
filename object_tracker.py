@@ -3,6 +3,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import time
 import tensorflow as tf
+from scipy.spatial import distance as dist
 physical_devices = tf.config.experimental.list_physical_devices('GPU')
 if len(physical_devices) > 0:
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
@@ -214,11 +215,26 @@ def main(_argv):
           cord_arr[track.track_id].append(((2 * 3.14 * 180)/(cord_arr[track.track_id][0] + cord_arr[track.track_id][1] * 360) * 1000 + 3))
         
         # Compute L2 Norms of all tracked objects
-        #for track1 in tracker.tracks:
-        #  for track2 in tracker.tracks:
-        #    if track2.track_id == track1.track_id:
-        #      continue
-            
+        norm_dict = dict()
+        for track1 in tracker.tracks:
+          if not track1.is_confirmed() or track1.time_since_update > 1:
+            continue
+          norm_dict[track1.track_id] = []
+          for track2 in tracker.tracks:
+            if not track2.is_confirmed() or track2.time_since_update > 1:
+              continue
+            norm_dict[track1.track_id].append(dist.euclidean(cord_arr[track1.track_id],cord_arr[track2.track_id]))
+        
+        #Create violations list 
+        violate_list_id = []
+        for key in norm_dict:
+          for count, val in enumerate(norm_dict[key]):
+            if val == 0.0:
+              continue
+            else:
+              if val < 150:
+                violate_list_id.append(key)
+                break
 
         # update tracks
         for track in tracker.tracks:
