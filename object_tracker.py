@@ -24,6 +24,8 @@ from deep_sort import preprocessing, nn_matching
 from deep_sort.detection import Detection
 from deep_sort.tracker import Tracker
 from tools import generate_detections as gdet
+from keras.models import load_model
+
 flags.DEFINE_string('framework', 'tf', '(tf, tflite, trt')
 flags.DEFINE_string('weights', './checkpoints/yolov4-416',
                     'path to weights file')
@@ -93,6 +95,11 @@ def main(_argv):
         out = cv2.VideoWriter(FLAGS.output, codec, fps, (width, height))
 
     frame_num = 0
+
+    #load facemask model
+    model = load_model("./model_data/face.h5")
+    global scores
+    scores = []
     # while video is running
     while True:
         return_value, frame = vid.read()
@@ -236,13 +243,36 @@ def main(_argv):
                 break
   
         cur_violations = len(violate_list_id)
-        # update tracks
+
+        #generate predictions for facemasks
+        test_data = []
         for track in tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 1:
                 continue 
             bbox = track.to_tlbr()
+            cr_image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
+            cr_image = cv2.cvtColor(cr_image, cv2.COLOR_RGB2BGR)
+            cr_image = cv2.resize(cr_image, (28,28), interpolation = cv2.INTER_AREA)
+            test_data.append(cr_image)
+
+        if len(test_data) != 0:
+          test_data = np.array(test_data, dtype="float") / 255.0                    
+          scores = model.predict(test_data)
+         
+        index = 0
+        # update tracks
+        for track in tracker.tracks:
+            if not track.is_confirmed() or track.time_since_update > 1:
+                continue
+            bbox = track.to_tlbr()
             class_name = track.get_class()
-          
+
+            face_mask_title = ''
+            if np.argmax(scores[index]) == 0:
+              face_mask_title = "without_mask"
+            else:
+              face_mask_title = "with_mask"
+            index +=1
         # draw bbox on screen
             color = colors[int(track.track_id) % len(colors)]
             color = [i * 255 for i in color]
@@ -250,7 +280,7 @@ def main(_argv):
               color = (255,0,0)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
-            cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+            cv2.putText(frame, face_mask_title + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
             cv2.putText(frame, "Current number of violations: " + str(cur_violations), (20,70),2,1,(255,255,255),2)
         # if enable info flag then print details about each track
             if FLAGS.info:
