@@ -248,12 +248,16 @@ def main(_argv):
         test_data = []
         for track in tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 1:
-                continue 
+                continue  
+            
             bbox = track.to_tlbr()
-            cr_image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
-            cr_image = cv2.cvtColor(cr_image, cv2.COLOR_RGB2BGR)
-            cr_image = cv2.resize(cr_image, (28,28), interpolation = cv2.INTER_AREA)
-            test_data.append(cr_image)
+            try:
+              cr_image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
+              cr_image = cv2.cvtColor(cr_image, cv2.COLOR_RGB2BGR)
+              cr_image = cv2.resize(cr_image, (28,28), interpolation = cv2.INTER_AREA)
+              test_data.append(cr_image)
+            except:
+              test_data.append(np.array([[[1]*3]*28]*28))
 
         if len(test_data) != 0:
           test_data = np.array(test_data, dtype="float") / 255.0                    
