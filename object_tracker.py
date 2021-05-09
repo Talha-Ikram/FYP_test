@@ -98,8 +98,8 @@ def main(_argv):
 
     #load facemask model
     model = load_model("./model_data/face.h5")
-    global scores
-    scores = []
+    global scores_facemask
+    scores_facemask = []
     # while video is running
     while True:
         return_value, frame = vid.read()
@@ -161,7 +161,6 @@ def main(_argv):
 
         # store all predictions in one parameter for simplicity when calling functions
         pred_bbox = [bboxes, scores, classes, num_objects]
-
         # read in all class names from config
         class_names = utils.read_class_names(cfg.YOLO.CLASSES)
 
@@ -189,6 +188,16 @@ def main(_argv):
         # delete detections that are not in allowed_classes
         bboxes = np.delete(bboxes, deleted_indx, axis=0)
         scores = np.delete(scores, deleted_indx, axis=0)
+        #try to delete low value humans only 
+        tester = np.float32(1)
+        deleted_scores = []
+        for i in range(len(scores)):
+          if scores[i]<0.3:
+            if classes[i] == tester:
+              deleted_scores.append(i)
+        bboxes = np.delete(bboxes, deleted_scores, axis=0)
+        scores = np.delete(scores, deleted_scores, axis=0)
+        names = np.delete(names, deleted_scores, axis=0)
 
         # encode yolo detections and feed to tracker
         features = encoder(frame, bboxes)
@@ -212,7 +221,7 @@ def main(_argv):
         # Compute Centroids and Depth
         cord_arr = dict()
         for track in tracker.tracks:
-          if not track.is_confirmed() or track.time_since_update > 1:
+          if not track.is_confirmed() or track.time_since_update > 1 or track.get_class()!='Person':
             continue
           bbox = track.to_tlbr()
           cord_arr[track.track_id] = []
@@ -223,11 +232,11 @@ def main(_argv):
         # Compute L2 Norms of all tracked objects
         norm_dict = dict()
         for track1 in tracker.tracks:
-          if not track1.is_confirmed() or track1.time_since_update > 1:
+          if not track1.is_confirmed() or track1.time_since_update > 1 or track1.get_class()!='Person':
             continue
           norm_dict[track1.track_id] = []
           for track2 in tracker.tracks:
-            if not track2.is_confirmed() or track2.time_since_update > 1:
+            if not track2.is_confirmed() or track2.time_since_update > 1 or track2.get_class()!='Person':
               continue
             norm_dict[track1.track_id].append(dist.euclidean(cord_arr[track1.track_id],cord_arr[track2.track_id]))
         
@@ -247,9 +256,8 @@ def main(_argv):
         #generate predictions for facemasks
         test_data = []
         for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
+            if not track.is_confirmed() or track.time_since_update > 1 or track.get_class()=='Person':
                 continue  
-            
             bbox = track.to_tlbr()
             try:
               cr_image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
@@ -261,7 +269,7 @@ def main(_argv):
 
         if len(test_data) != 0:
           test_data = np.array(test_data, dtype="float") / 255.0                    
-          scores = model.predict(test_data)
+          scores_facemask = model.predict(test_data)
          
         index = 0
         # update tracks
@@ -271,12 +279,13 @@ def main(_argv):
             bbox = track.to_tlbr()
             class_name = track.get_class()
 
-            face_mask_title = ''
-            if np.argmax(scores[index]) == 0:
-              face_mask_title = "without_mask"
-            else:
-              face_mask_title = "with_mask"
-            index +=1
+            if class_name != 'Person':
+              face_mask_title = ''
+              if np.argmax(scores_facemask[index]) == 0:
+                face_mask_title = "without_mask"
+              else:
+                face_mask_title = "with_mask"
+              index +=1
         # draw bbox on screen
             color = colors[int(track.track_id) % len(colors)]
             color = [i * 255 for i in color]
@@ -284,7 +293,10 @@ def main(_argv):
               color = (255,0,0)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
             cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
-            cv2.putText(frame, face_mask_title + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+            if class_name != 'Person':
+              cv2.putText(frame, face_mask_title + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+            else:
+              cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
             cv2.putText(frame, "Current number of violations: " + str(cur_violations), (20,70),2,1,(255,255,255),2)
         # if enable info flag then print details about each track
             if FLAGS.info:
