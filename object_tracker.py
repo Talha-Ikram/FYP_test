@@ -2,7 +2,11 @@ import os
 # comment out below line to enable tensorflow logging outputs
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import time
+import sys
+import copy
+import threading
 import tensorflow as tf
+from tensorflow import keras
 from scipy.spatial import distance as dist
 physical_devices = tf.config.experimental.list_physical_devices('GPU')
 if len(physical_devices) > 0:
@@ -25,97 +29,34 @@ from deep_sort.detection import Detection
 from deep_sort.tracker import Tracker
 from tools import generate_detections as gdet
 from keras.models import load_model
+import easygui
 
 flags.DEFINE_string('framework', 'tf', '(tf, tflite, trt')
 flags.DEFINE_string('weights', './checkpoints/yolov4-416',
                     'path to weights file')
 flags.DEFINE_integer('size', 416, 'resize images to')
-flags.DEFINE_boolean('tiny', False, 'yolo or yolo-tiny')
+flags.DEFINE_boolean('tiny', True, 'yolo or yolo-tiny')
 flags.DEFINE_string('model', 'yolov4', 'yolov3 or yolov4')
 flags.DEFINE_string('video', './data/video/test.mp4', 'path to input video or set to 0 for webcam')
 flags.DEFINE_string('output', None, 'path to output video')
 flags.DEFINE_string('output_format', 'XVID', 'codec used in VideoWriter when saving video to file')
 flags.DEFINE_float('iou', 0.45, 'iou threshold')
-flags.DEFINE_float('score', 0.50, 'score threshold')
+flags.DEFINE_float('score', 0.01, 'score threshold')
 flags.DEFINE_boolean('dont_show', False, 'dont show video output')
 flags.DEFINE_boolean('info', False, 'show detailed info of tracked objects')
 flags.DEFINE_boolean('count', False, 'count objects being tracked on screen')
 
+global result_thread, running_thread, hist_thread
+result_thread = []
+running_thread = False
+hist_thread = []
 
-def main(_argv):
-    # Definition of the parameters
-    max_cosine_distance = 0.4
-    nn_budget = None
-    nms_max_overlap = 1.0
-    
-    # initialize deep sort
-    model_filename = 'model_data/mars-small128.pb'
-    encoder = gdet.create_box_encoder(model_filename, batch_size=1)
-    # calculate cosine distance metric
-    metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-    # initialize tracker
-    tracker = Tracker(metric)
-
-    # load configuration for object detector
-    config = ConfigProto()
-    config.gpu_options.allow_growth = True
-    session = InteractiveSession(config=config)
-    STRIDES, ANCHORS, NUM_CLASS, XYSCALE = utils.load_config(FLAGS)
-    input_size = FLAGS.size
-    video_path = FLAGS.video
-
-    # load tflite model if flag is set
-    if FLAGS.framework == 'tflite':
-        interpreter = tf.lite.Interpreter(model_path=FLAGS.weights)
-        interpreter.allocate_tensors()
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
-        print(input_details)
-        print(output_details)
-    # otherwise load standard tensorflow saved model
-    else:
-        saved_model_loaded = tf.saved_model.load(FLAGS.weights, tags=[tag_constants.SERVING])
-        infer = saved_model_loaded.signatures['serving_default']
-
-    # begin video capture
-    try:
-        vid = cv2.VideoCapture(int(video_path))
-    except:
-        vid = cv2.VideoCapture(video_path)
-
-    out = None
-
-    # get video ready to save locally if flag is set
-    if FLAGS.output:
-        # by default VideoCapture returns float instead of int
-        width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(vid.get(cv2.CAP_PROP_FPS))
-        codec = cv2.VideoWriter_fourcc(*FLAGS.output_format)
-        out = cv2.VideoWriter(FLAGS.output, codec, fps, (width, height))
-
-    frame_num = 0
-
-    #load facemask model
-    model = load_model("./model_data/face.h5")
-    global scores_facemask
-    scores_facemask = []
-    # while video is running
-    while True:
-        return_value, frame = vid.read()
-        if return_value:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame)
-        else:
-            print('Video has ended or failed, try a different video format!')
-            break
-        frame_num +=1
-        print('Frame #: ', frame_num)
+def threader(frame, image, input_size, infer, encoder, nms_max_overlap, tracker, model, thresh):
+        global result_thread
         frame_size = frame.shape[:2]
         image_data = cv2.resize(frame, (input_size, input_size))
         image_data = image_data / 255.
         image_data = image_data[np.newaxis, ...].astype(np.float32)
-        start_time = time.time()
 
         # run detections on tflite if flag is set
         if FLAGS.framework == 'tflite':
@@ -123,7 +64,7 @@ def main(_argv):
             interpreter.invoke()
             pred = [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))]
             # run detections using yolov3 if flag is set
-            if FLAGS.model == 'yolov3' and FLAGS.tiny == True:
+            if FLAGS.model == 'yolov3' and FLAGS.tiny  == True:
                 boxes, pred_conf = filter_boxes(pred[1], pred[0], score_threshold=0.25,
                                                 input_shape=tf.constant([input_size, input_size]))
             else:
@@ -189,12 +130,12 @@ def main(_argv):
         bboxes = np.delete(bboxes, deleted_indx, axis=0)
         scores = np.delete(scores, deleted_indx, axis=0)
         #try to delete low value humans only 
-        tester = np.float32(1)
+        tester = np.float32(0)
         deleted_scores = []
         for i in range(len(scores)):
-          if scores[i]<0.3:
+          if scores[i]<0.5:
             if classes[i] == tester:
-              deleted_scores.append(i)
+              deleted_scores.append(i)    
         bboxes = np.delete(bboxes, deleted_scores, axis=0)
         scores = np.delete(scores, deleted_scores, axis=0)
         names = np.delete(names, deleted_scores, axis=0)
@@ -228,7 +169,39 @@ def main(_argv):
           cord_arr[track.track_id].append((int(bbox[0])+int(bbox[2]))/2)
           cord_arr[track.track_id].append((int(bbox[1])+int(bbox[3]))/2)
           cord_arr[track.track_id].append(((2 * 3.14 * 180)/(cord_arr[track.track_id][0] + cord_arr[track.track_id][1] * 360) * 1000 + 3))
-        
+          cord_arr[track.track_id][0] = cord_arr[track.track_id][0]/1920
+          cord_arr[track.track_id][1] = cord_arr[track.track_id][1]/1080
+          cord_arr[track.track_id][2] = cord_arr[track.track_id][2]/28
+
+        kick_list = []
+        for track in cord_arr.keys():
+            for track2 in cord_arr.keys():
+                if track != track2:
+                    x = abs(cord_arr[track][0] - cord_arr[track2][0])
+                    y = abs(cord_arr[track][1] - cord_arr[track2][1])
+                    if x < 0.0208 and y < 0.0370:
+                        kick_list.append([track, track2])
+        kick_final = []
+        for kick in kick_list:
+            for track in tracker.tracks:
+                if not track.is_confirmed() or track.time_since_update > 1 or track.get_class()!='Person' or track.track_id == kick[0]:
+                    continue
+                for track2 in tracker.tracks:
+                    if not track2.is_confirmed() or track2.time_since_update > 1 or track2.get_class()!='Person' or track2.track_id == kick[1]:
+                        continue
+                    bbox1 = track.to_tlbr()
+                    bbox2 = track2.to_tlbr()
+                    if int(bbox1[0]) < int(bbox2[0]) and int(bbox2[2]) < int(bbox1[2]):
+                        if track2.track_id not in kick_final:
+                            kick_final.append(track2.track_id)
+                    else:
+                        if track.track_id not in kick_final:
+                            kick_final.append(track.track_id)
+
+        for index, track in enumerate(tracker.tracks):
+            if track.track_id in kick_final:
+                tracker.tracks.pop(index)
+
         # Compute L2 Norms of all tracked objects
         norm_dict = dict()
         for track1 in tracker.tracks:
@@ -247,9 +220,9 @@ def main(_argv):
             if val == 0.0:
               continue
             else:
-              if val < 150:
-                violate_list_id.append(key)
-                break
+                if val < ((thresh-90)/170):
+                    violate_list_id.append(key)
+                    break
   
         cur_violations = len(violate_list_id)
 
@@ -262,61 +235,250 @@ def main(_argv):
             try:
               cr_image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
               cr_image = cv2.cvtColor(cr_image, cv2.COLOR_RGB2BGR)
-              cr_image = cv2.resize(cr_image, (28,28), interpolation = cv2.INTER_AREA)
+              cr_image = cv2.resize(cr_image, (32,32), interpolation = cv2.INTER_AREA)
               test_data.append(cr_image)
             except:
-              test_data.append(np.array([[[1]*3]*28]*28))
-
+              test_data.append(np.array([[[1]*3]*32]*32))
+        scores_facemask = []
         if len(test_data) != 0:
-          test_data = np.array(test_data, dtype="float") / 255.0                    
-          scores_facemask = model.predict(test_data)
-         
-        index = 0
-        # update tracks
-        for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue
-            bbox = track.to_tlbr()
-            class_name = track.get_class()
+            test_data = np.array(test_data, dtype="float") / 255.0                    
+            scores_facemask.append(model.predict(test_data))
+        result_thread.append([tracker, scores_facemask, violate_list_id, cur_violations, colors])
 
-            if class_name != 'Person':
-              face_mask_title = ''
-              if np.argmax(scores_facemask[index]) == 0:
-                face_mask_title = "without_mask"
-              else:
-                face_mask_title = "with_mask"
-              index +=1
-        # draw bbox on screen
-            color = colors[int(track.track_id) % len(colors)]
-            color = [i * 255 for i in color]
-            if track.track_id in violate_list_id:
-              color = (255,0,0)
-            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
-            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
-            if class_name != 'Person':
-              cv2.putText(frame, face_mask_title + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+def main(_argv):
+    # Definition of the parameters
+    max_cosine_distance = 0.4
+    nn_budget = None
+    nms_max_overlap = 1.0
+    
+    # initialize deep sort
+    model_filename = 'model_data/mars-small128.pb'
+    encoder = gdet.create_box_encoder(model_filename, batch_size=1)
+    # calculate cosine distance metric
+    metric = nn_matching.NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
+    # initialize tracker
+    tracker = Tracker(metric)
+
+    # load configuration for object detector
+    config = ConfigProto()
+    config.gpu_options.allow_growth = True
+    session = InteractiveSession(config=config)
+    STRIDES, ANCHORS, NUM_CLASS, XYSCALE = utils.load_config(FLAGS)
+    input_size = FLAGS.size
+    #video_path = FLAGS.video
+    video_path = easygui.fileopenbox()
+
+    # load tflite model if flag is set
+    if FLAGS.framework == 'tflite':
+        interpreter = tf.lite.Interpreter(model_path=FLAGS.weights)
+        interpreter.allocate_tensors()
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+        print(input_details)
+        print(output_details)
+    # otherwise load standard tensorflow saved model
+    else:
+        saved_model_loaded = tf.saved_model.load(FLAGS.weights, tags=[tag_constants.SERVING])
+        infer = saved_model_loaded.signatures['serving_default']
+
+    # begin video capture
+    try:
+        vid = cv2.VideoCapture(int(video_path))
+    except:
+        vid = cv2.VideoCapture(video_path)
+
+    out = None
+
+    # get video ready to save locally if flag is set
+    if FLAGS.output:
+        # by default VideoCapture returns float instead of int
+        width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = int(vid.get(cv2.CAP_PROP_FPS))
+        codec = cv2.VideoWriter_fourcc(*FLAGS.output_format)
+        out = cv2.VideoWriter(FLAGS.output, codec, fps, (width, height))
+
+    frame_num = 0
+
+    #load facemask model
+    #model = load_model("./model_data/face_keras_new.h5")
+    base_model = tf.keras.applications.MobileNet(
+        input_shape=(128,128,3),
+        alpha=1.0,
+        depth_multiplier=1,
+        dropout=0.001,
+        include_top=False,
+        weights="imagenet",
+        input_tensor=None,
+        pooling=None,
+        classes=2,
+        classifier_activation="sigmoid"
+    )
+    base_model.trainable = False
+    inputs = keras.Input(shape=(128, 128, 3))
+
+    x = base_model(inputs, training=False)
+    x = keras.layers.GlobalAveragePooling2D()(x)
+    x = keras.layers.Dropout(0.2)(x)  # Regularize with dropout
+
+    outputs = keras.layers.Dense(2)(x)
+    model = keras.Model(inputs, outputs)
+    model.compile(optimizer=keras.optimizers.Adam(),
+                  loss=keras.losses.BinaryCrossentropy(from_logits=True),
+                  metrics=[keras.metrics.BinaryAccuracy()])
+    model.load_weights('./model_data/me2.h5')
+
+    
+    # while video is running
+    cv2.namedWindow("Absaar",flags= cv2.WINDOW_GUI_EXPANDED)
+    f = open("config.txt", "r")
+    thresh = int(f.readline())
+    f.close()
+    size_var=0
+    while True:
+        global running_thread, result_thread, hist_thread
+        start_time = time.time()
+        return_value, frame = vid.read()
+        if return_value:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(frame)
+        else:
+            print('Video has ended or failed, try a different video format!')
+            break
+        frame_num +=1
+        print('Frame #: ', frame_num)
+        cmap = plt.get_cmap('tab20b')
+        colors = [cmap(i)[:3] for i in np.linspace(0, 1, 20)]
+        if len(result_thread) == 0 and running_thread == False:
+            t1 = threading.Thread(target=threader, args = (frame, image, input_size, infer, encoder, nms_max_overlap, tracker, model, thresh,))
+            t1.start()
+            running_thread = True
+
+        if len(result_thread)!=0:
+            index = 0
+            # update tracks
+            for track in result_thread[0][0].tracks:
+                if not track.is_confirmed() or track.time_since_update > 1:
+                    continue
+                bbox = track.to_tlbr()
+                class_name = track.get_class()
+                
+                if class_name != 'Person':
+                  face_mask_title = ''
+                  if np.argmax(result_thread[0][1][0][index]) == 1:
+                    face_mask_title = "without_mask"
+                  else:
+                    face_mask_title = "with_mask"
+                  index +=1
+            # draw bbox on screen
+                #if int(track.track_id) == 13:
+                   #face_mask_title = "without_mask"
+                color = colors[int(track.track_id) % len(colors)]
+                color = [i * 255 for i in color]
+                if track.track_id in result_thread[0][2]:
+                  color = (255,0,0)
+                cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
+                cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
+                if class_name != 'Person':
+                  cv2.putText(frame, face_mask_title + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+                else:
+                    cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+            cur_violations = int(result_thread[0][3])
+            cv2.putText(frame, "Social distance violators: " + str(cur_violations), (20,120),2,1,(255,255,255),2)
+            cv2.putText(frame, "Alert level: ", (20,170),2,1,(255,255,255),2)
+            if cur_violations == 0:
+                cv2.putText(frame, 'None', (240,170),2,1,(50,205,50),2)
+            elif cur_violations < 3:
+                cv2.putText(frame, 'Medium', (240,170),2,1,(255,140,0),2)
             else:
-              cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
-            cv2.putText(frame, "Current number of violations: " + str(cur_violations), (20,70),2,1,(255,255,255),2)
-        # if enable info flag then print details about each track
-            if FLAGS.info:
-                print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(str(track.track_id), class_name, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+                if size_var ==0:
+                    cv2.putText(frame, 'HIGH!!', (240,170),2,2,(255,0,0),2)
+                    size_var = 1
+                else:
+                    cv2.putText(frame, 'HIGH!!', (240,170),2,1,(255,0,0),2)
+                    size_var = 0
+            # calculate frames per second of running detections
+            result = np.asarray(frame)
+            result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            cv2.imshow("Absaar", result)
 
-        # calculate frames per second of running detections
-        fps = 1.0 / (time.time() - start_time)
+            hist_thread = copy.deepcopy(result_thread)
+            result_thread = []
+            running_thread = False
+            
+            # if output flag is set, save video file
+            if FLAGS.output:
+                out.write(result)
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            
+        else:
+            if len(hist_thread)!=0:
+                index = 0
+                # update tracks
+                for track in hist_thread[0][0].tracks:
+                    if not track.is_confirmed() or track.time_since_update > 1:
+                        continue
+                    bbox = track.to_tlbr()
+                    class_name = track.get_class()
+
+                    if class_name != 'Person':
+                      face_mask_title = ''
+                      if np.argmax(hist_thread[0][1][0][index]) == 1:
+                        face_mask_title = "without_mask"
+                      else:
+                        face_mask_title = "with_mask"
+                      index +=1
+                # draw bbox on screen
+                    #if int(track.track_id) == 13:
+                       #face_mask_title = "without_mask"
+                    color = colors[int(track.track_id) % len(colors)]
+                    color = [i * 255 for i in color]
+                    if track.track_id in hist_thread[0][2]:
+                      color = (255,0,0)
+                    cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
+                    cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
+                    if class_name != 'Person':
+                      cv2.putText(frame, face_mask_title + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+                    else:
+                        cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+                cur_violations = int(hist_thread[0][3])
+                cv2.putText(frame, "Social distance violators: " + str(cur_violations), (20,120),2,1,(255,255,255),2)
+                cv2.putText(frame, "Alert level: ", (20,170),2,1,(255,255,255),2)
+                if cur_violations == 0:
+                    cv2.putText(frame, 'None', (240,170),2,1,(50,205,50),2)
+                elif cur_violations < 3:
+                    cv2.putText(frame, 'Medium', (240,170),2,1,(255,140,0),2)
+                else:
+                    if size_var ==0:
+                        cv2.putText(frame, 'HIGH!!', (240,170),2,2,(255,0,0),2)
+                        size_var = 1
+                    else:
+                        cv2.putText(frame, 'HIGH!!', (240,170),2,1,(255,0,0),2)
+                        size_var = 0
+                # calculate frames per second of running detections
+                result = np.asarray(frame)
+                result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                cv2.imshow("Absaar", result)
+                
+                # if output flag is set, save video file
+                if FLAGS.output:
+                    out.write(result)
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+            else: 
+                # calculate frames per second of running detections
+                result = np.asarray(frame)
+                result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                cv2.imshow("Absaar", result)
+                # if output flag is set, save video file
+                if FLAGS.output:
+                    out.write(result)
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+        fps = 1.0 / (time.time() - start_time + 0.0000001)
         print("FPS: %.2f" % fps)
-        result = np.asarray(frame)
-        result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        
-        if not FLAGS.dont_show:
-            cv2.imshow("Output Video", result)
-        
-        # if output flag is set, save video file
-        if FLAGS.output:
-            out.write(result)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
     cv2.destroyAllWindows()
 
+def runner():
+    app.run(main)
 if __name__ == '__main__':
     try:
         app.run(main)

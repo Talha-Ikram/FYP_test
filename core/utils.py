@@ -80,7 +80,7 @@ def read_class_names(class_file_name):
     return names
 
 def load_config(FLAGS):
-    if FLAGS.tiny:
+    if FLAGS.tiny or FLAGS.tiny_wb:
         STRIDES = np.array(cfg.YOLO.STRIDES_TINY)
         ANCHORS = get_anchors(cfg.YOLO.ANCHORS_TINY, FLAGS.tiny)
         XYSCALE = cfg.YOLO.XYSCALE_TINY if FLAGS.model == 'yolov4' else [1, 1]
